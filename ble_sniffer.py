@@ -1,63 +1,112 @@
 import asyncio
+import argparse
 from bleak import BleakScanner
-
-TARGET_MAC = "A8:0B:6B:F4:23:38"
+from bleak.exc import BleakBluetoothNotAvailableError
 STEPPED_ON_HEX = "00000000000024000000000000"
-
-async def discover_scale(timeout: float = 5.0) -> str | None:
-    """
-    Scans for BLE advertisers and returns the MAC of the first device that
-    broadcasts manufacturer data matching STEPPED_ON_HEX.
-    """
-    while True:
-        devices = await BleakScanner.discover(timeout=timeout)
-
-        for d in devices:
-            # bleak exposes advertisement details via metadata (best-effort)
-            md = (d.metadata or {})
-            mfg = md.get("manufacturer_data") or {}
-
-            for _company_id, payload in mfg.items():
-                if payload.hex() == STEPPED_ON_HEX:
-                    print(f"[+] Found scale: {d.address} ({d.name})")
-                    return d.address
 
 def get_weight_from_bytes(data: bytes) -> tuple[float, float]:
     weight_raw = int.from_bytes(data, byteorder="big") 
     weight_kg = weight_raw / 100.0 
     weight_lb = weight_kg * 2.2046226218  
-    return weight_kg, weight_lb  
+    return weight_kg, weight_lb
 
-def detection_callback(device, advertisement_data):
-    if device.address.upper() != TARGET_MAC:
-        return
+class Sniffer:
+    def __init__(self, target_mac):
+        self.target_mac = target_mac.upper() if target_mac else None
 
-    mfg = advertisement_data.manufacturer_data
-    if not mfg:
-        return
+    async def discover_scale(self, timeout: float = 5.0) -> str:
+        """
+        Scans for BLE advertisers and returns the MAC of the first device that
+        broadcasts manufacturer data matching STEPPED_ON_HEX.
+        """
+        while True:
+            try:
+                devices = await BleakScanner.discover(timeout=timeout)
 
-    for _, data in mfg.items():
-        hex_data = data.hex()
-        if hex_data == STEPPED_ON_HEX:
-            print("[+] Scale has been stepped on")
-            continue
+                for d in devices:
+                    md = (d.metadata or {})
+                    mfg = md.get("manufacturer_data") or {}
 
-        kg, lb = get_weight_from_bytes(data[0:2])
-        print(f"[+] User weighed in at {kg}kgs {lb}lbs")
+                    for _company_id, payload in mfg.items():
+                        if payload.hex() == STEPPED_ON_HEX:
+                            print(f"[+] Found scale: {d.address} ({d.name})")
+                            return d.address
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                exit("CTRL+C detected!")
+            except BleakBluetoothNotAvailableError:
+                exit("[-] Failed to find valid bluetooth adapter... :(")
+
+    def detection_callback(device, advertisement_data):
+        if device.address.upper() != self.target_mac:
+            return
+
+        mfg = advertisement_data.manufacturer_data
+        if not mfg:
+            return
+
+        for _, data in mfg.items():
+            hex_data = data.hex()
+            if hex_data == STEPPED_ON_HEX:
+                print("[+] Scale has been stepped on")
+                continue
+
+            kg, lb = get_weight_from_bytes(data[0:2])
+            print(f"[+] User weighed in at {kg}kgs {lb}lbs")
+
+    async def start(self) -> None:
+        if self.target_mac is None:
+            print("[+] No MAC provided; attempting scale discovery... xD")
+            self.target_mac = (await self.discover_scale()).upper()
+            print(f"[+] Using target MAC: {self.target_mac}")
+
+        def detection_callback(device, advertisement_data):
+            if device.address.upper() != self.target_mac:
+                return
+
+            mfg = advertisement_data.manufacturer_data or {}
+            if not mfg:
+                return
+
+            for _, data in mfg.items():
+                hex_data = data.hex()
+
+                if hex_data == STEPPED_ON_HEX:
+                    print("[+] Scale has been stepped on")
+                    continue
+
+                if len(data) < 2:
+                    return
+
+                kg, lb = get_weight_from_bytes(data[0:2])
+                print(f"[+] User weighed in at {kg:.2f} kg ({lb:.2f} lb)")
+
+        scanner = BleakScanner(detection_callback)
+        print("[+] Listening for scale updates... (ctrl+C to stop)")
+
+        try:
+            await scanner.start()
+            while True:
+                await asyncio.sleep(1)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\n[-] Stopping scanner...")
+        finally:
+            await scanner.stop()
+            print("[+] Scanner stopped cleanly")
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="OKOK BLE scale sniffer")
+    parser.add_argument(
+        "--target-mac", "-t",
+        help="Target scale MAC address (optional, auto-discover if omitted)",
+        default=None
+    )
+    return parser.parse_args()
+
 
 async def main():
-    scanner = BleakScanner(detection_callback)
-    print("[+] Listening for scale updates... (ctrl+C to stop)")
+    args = parse_args()
+    sniffer = Sniffer(target_mac=args.target_mac)
+    await sniffer.start()
 
-    try:
-        await scanner.start()
-        while True:
-            await asyncio.sleep(1)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        print("\n[-] Stopping scanner...")
-    finally:
-        await scanner.stop()
-        print("[+] Scanner stopped cleanly")
-
-asyncio.run(main())
-
+if __name__ == "__main__":
+    asyncio.run(main())
