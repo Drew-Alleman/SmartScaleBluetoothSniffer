@@ -14,27 +14,44 @@ class Sniffer:
     def __init__(self, target_mac):
         self.target_mac = target_mac.upper() if target_mac else None
 
-    async def discover_scale(self, timeout: float = 5.0) -> str:
+    async def discover_scale(self, timeout: float = 10.0) -> str:
         """
-        Scans for BLE advertisers and returns the MAC of the first device that
-        broadcasts manufacturer data matching STEPPED_ON_HEX.
+        Scan using a callback until we see STEPPED_ON_HEX in manufacturer_data.
+        Returns the MAC address of that device.
         """
+        found = asyncio.Future()
+
+        def cb(device, advertisement_data):
+            # manufacturer_data is on advertisement_data (stable across Bleak versions)
+            mfg = advertisement_data.manufacturer_data or {}
+            for _, payload in mfg.items():
+                if payload.hex() == STEPPED_ON_HEX and not found.done():
+                    found.set_result(device.address)
+
+        try:
+            scanner = BleakScanner(cb)
+        except BleakBluetoothNotAvailableError:
+            exit("[-] Failed to find bluetooth adapter :(")
+
+        async def get_mac_address() -> str | None:
+            try:
+                await scanner.start()
+                try:
+                    return await asyncio.wait_for(found, timeout=timeout)
+                except asyncio.TimeoutError:
+                    return None
+            finally:
+                await scanner.stop()
+
         while True:
             try:
-                devices = await BleakScanner.discover(timeout=timeout)
-
-                for d in devices:
-                    md = (d.metadata or {})
-                    mfg = md.get("manufacturer_data") or {}
-
-                    for _company_id, payload in mfg.items():
-                        if payload.hex() == STEPPED_ON_HEX:
-                            print(f"[+] Found scale: {d.address} ({d.name})")
-                            return d.address
+                mac_address = await get_mac_address()
+                if not mac_address:
+                    continue
+                print(f"[+] Found scale with MAC Address: {mac_address}")
+                return mac_address
             except (KeyboardInterrupt, asyncio.CancelledError):
-                exit("CTRL+C detected!")
-            except BleakBluetoothNotAvailableError:
-                exit("[-] Failed to find valid bluetooth adapter... :(")
+                exit("[-] CTRL+C detected!")
 
     def detection_callback(device, advertisement_data):
         if device.address.upper() != self.target_mac:
@@ -55,7 +72,7 @@ class Sniffer:
 
     async def start(self) -> None:
         if self.target_mac is None:
-            print("[+] No MAC provided; attempting scale discovery... xD")
+            print("[+] No MAC provided; attempting scale discovery... xD (go step on it)")
             self.target_mac = (await self.discover_scale()).upper()
             print(f"[+] Using target MAC: {self.target_mac}")
 
