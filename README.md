@@ -1,4 +1,5 @@
 # Bluetooth Sniffer for a Temu Bluetooth Scale by OKOK
+needs python3 module bleak (`pip3 install bleak`)
 ```
 $ python3 ble_sniffer.py
 [+] No MAC provided; attempting scale discovery... xD (go step on it)
